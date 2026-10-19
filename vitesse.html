@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Vitesse">
+<meta name="theme-color" content="#0b0f14">
+<title>Vitesse Course</title>
+<style>
+  :root { --bg:#0b0f14; --fg:#f2f5f8; --muted:#8a96a3; --accent:#3ddc84; --stop:#ff5a5f; --card:#151b23; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",system-ui,sans-serif; }
+  body { display:flex; flex-direction:column; padding:calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 16px); }
+  .speed { flex:1; display:flex; flex-direction:column; justify-content:center; align-items:center; }
+  .value { font-size:min(38vw,220px); font-weight:700; line-height:1; font-variant-numeric:tabular-nums; letter-spacing:-0.03em; }
+  .unit { font-size:28px; color:var(--muted); margin-top:8px; }
+  .status { font-size:15px; color:var(--muted); margin-top:18px; text-align:center; min-height:20px; }
+  .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:16px; }
+  .card { background:var(--card); border-radius:14px; padding:12px 8px; text-align:center; }
+  .card b { display:block; font-size:22px; font-variant-numeric:tabular-nums; }
+  .card span { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  button { width:100%; border:0; border-radius:18px; padding:22px; font-size:22px; font-weight:700;
+    color:#06110a; background:var(--accent); }
+  button.running { background:var(--stop); color:#fff; }
+  .gps { display:inline-block; width:10px; height:10px; border-radius:50%; background:#555; margin-right:6px; vertical-align:middle; }
+  .gps.ok { background:var(--accent); } .gps.weak { background:#f5b041; } .gps.bad { background:var(--stop); }
+</style>
+</head>
+<body>
+  <div class="speed">
+    <div class="value" id="speed">0,0</div>
+    <div class="unit">km/h</div>
+    <div class="status" id="status"><span class="gps" id="gpsDot"></span>Appuyez sur Démarrer</div>
+  </div>
+
+  <div class="grid">
+    <div class="card"><b id="time">00:00</b><span>Durée</span></div>
+    <div class="card"><b id="dist">0,00</b><span>km</span></div>
+    <div class="card"><b id="avg">0,0</b><span>Moy. km/h</span></div>
+  </div>
+
+  <button id="btn">Démarrer</button>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const fmt1 = n => n.toFixed(1).replace('.', ',');
+  const fmt2 = n => n.toFixed(2).replace('.', ',');
+
+  let watchId = null, timerId = null, wakeLock = null;
+  let startTime = 0, distance = 0, last = null, smooth = 0;
+  let recent = []; // positions des dernières secondes (repli si l'iPhone ne fournit pas la vitesse)
+
+  const MAX_ACCURACY = 30;   // m : au-delà, le point GPS est ignoré
+  const MIN_SPEED = 1.0;     // km/h : en dessous, on affiche 0,0 (bruit à l'arrêt)
+  const ALPHA = 0.5;         // lissage (0 = très lissé, 1 = brut)
+
+  function haversine(a, b) {
+    const R = 6371000, toRad = x => x * Math.PI / 180;
+    const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lon - a.lon);
+    const h = Math.sin(dLat/2)**2 + Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*Math.sin(dLon/2)**2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+
+  function setGps(acc) {
+    const dot = $('gpsDot');
+    dot.className = 'gps ' + (acc <= 10 ? 'ok' : acc <= MAX_ACCURACY ? 'weak' : 'bad');
+  }
+
+  function onPosition(pos) {
+    const c = pos.coords;
+    const p = { lat: c.latitude, lon: c.longitude, t: pos.timestamp, acc: c.accuracy };
+    setGps(c.accuracy);
+
+    if (c.accuracy > MAX_ACCURACY) {
+      $('status').lastChild.textContent = `Signal GPS faible (±${Math.round(c.accuracy)} m)`;
+      return;
+    }
+    $('status').lastChild.textContent = `GPS ±${Math.round(c.accuracy)} m`;
+
+    // Distance cumulée
+    if (last) {
+      const d = haversine(last, p);
+      if (d > 0.5 && d < 100) distance += d;
+    }
+    last = p;
+
+    // Vitesse instantanée : celle du GPS si disponible, sinon calculée sur ~4 s
+    let kmh;
+    if (c.speed !== null && c.speed >= 0) {
+      kmh = c.speed * 3.6;
+    } else {
+      recent.push(p);
+      recent = recent.filter(q => p.t - q.t <= 4000);
+      if (recent.length >= 2) {
+        let d = 0;
+        for (let i = 1; i < recent.length; i++) d += haversine(recent[i-1], recent[i]);
+        const dt = (recent[recent.length-1].t - recent[0].t) / 1000;
+        kmh = dt > 0 ? (d / dt) * 3.6 : 0;
+      } else kmh = 0;
+    }
+
+    smooth = ALPHA * kmh + (1 - ALPHA) * smooth;
+    $('speed').textContent = fmt1(smooth < MIN_SPEED ? 0 : smooth);
+    $('dist').textContent = fmt2(distance / 1000);
+  }
+
+  function onError(err) {
+    const msg = err.code === 1
+      ? 'Accès à la position refusé : Réglages › Confidentialité › Service de localisation › Safari'
+      : 'Recherche du signal GPS…';
+    $('status').lastChild.textContent = msg;
+    $('gpsDot').className = 'gps bad';
+  }
+
+  function tick() {
+    const s = Math.floor((Date.now() - startTime) / 1000);
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+    const pad = n => String(n).padStart(2, '0');
+    $('time').textContent = h ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+    const avg = s > 0 ? (distance / s) * 3.6 : 0;
+    $('avg').textContent = fmt1(avg);
+  }
+
+  async function keepAwake() {
+    try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (watchId !== null && document.visibilityState === 'visible') keepAwake();
+  });
+
+  function start() {
+    if (!('geolocation' in navigator)) { $('status').lastChild.textContent = 'GPS non disponible'; return; }
+    distance = 0; last = null; smooth = 0; recent = [];
+    startTime = Date.now();
+    $('speed').textContent = '0,0'; $('dist').textContent = '0,00'; $('avg').textContent = '0,0'; $('time').textContent = '00:00';
+    $('status').lastChild.textContent = 'Recherche du signal GPS…';
+    watchId = navigator.geolocation.watchPosition(onPosition, onError,
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+    timerId = setInterval(tick, 1000);
+    keepAwake();
+    $('btn').textContent = 'Arrêter'; $('btn').classList.add('running');
+  }
+
+  function stop() {
+    navigator.geolocation.clearWatch(watchId); watchId = null;
+    clearInterval(timerId); tick();
+    if (wakeLock) { wakeLock.release().catch(()=>{}); wakeLock = null; }
+    $('speed').textContent = '0,0';
+    $('status').lastChild.textContent = 'Course terminée';
+    $('gpsDot').className = 'gps';
+    $('btn').textContent = 'Démarrer'; $('btn').classList.remove('running');
+  }
+
+  $('btn').addEventListener('click', () => watchId === null ? start() : stop());
+})();
+</script>
+</body>
+</html>
