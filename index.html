@@ -18,6 +18,7 @@
   .speed { flex:1; display:flex; flex-direction:column; justify-content:center; align-items:center; }
   .value { font-size:min(38vw,220px); font-weight:700; line-height:1; font-variant-numeric:tabular-nums; letter-spacing:-0.03em; }
   .unit { font-size:28px; color:var(--muted); margin-top:8px; }
+  .pace { font-size:24px; color:var(--fg); opacity:.8; margin-top:10px; font-variant-numeric:tabular-nums; }
   .status { font-size:15px; color:var(--muted); margin-top:18px; text-align:center; min-height:20px; }
   .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:16px; }
   .card { background:var(--card); border-radius:14px; padding:12px 8px; text-align:center; }
@@ -34,6 +35,7 @@
   <div class="speed">
     <div class="value" id="speed">0,0</div>
     <div class="unit">km/h</div>
+    <div class="pace" id="pace">--:-- min/km</div>
     <div class="status" id="status"><span class="gps" id="gpsDot"></span>Appuyez sur Démarrer</div>
   </div>
 
@@ -50,6 +52,14 @@
   const $ = id => document.getElementById(id);
   const fmt1 = n => n.toFixed(1).replace('.', ',');
   const fmt2 = n => n.toFixed(2).replace('.', ',');
+  // Allure en min/km à partir d'une vitesse en km/h (ex. 12 km/h → 5:00 min/km)
+  const fmtPace = kmh => {
+    if (!kmh || kmh < MIN_SPEED) return '--:-- min/km';
+    let total = Math.round(3600 / kmh);          // secondes par km
+    if (total > 5999) return '--:-- min/km';     // au-delà de 99:59, pas significatif
+    const m = Math.floor(total / 60), s = total % 60;
+    return `${m}:${String(s).padStart(2, '0')} min/km`;
+  };
 
   let watchId = null, timerId = null, wakeLock = null;
   let startTime = 0, distance = 0, last = null, smooth = 0;
@@ -106,6 +116,7 @@
 
     smooth = ALPHA * kmh + (1 - ALPHA) * smooth;
     $('speed').textContent = fmt1(smooth < MIN_SPEED ? 0 : smooth);
+    $('pace').textContent = fmtPace(smooth);
     $('dist').textContent = fmt2(distance / 1000);
   }
 
@@ -137,7 +148,7 @@
     if (!('geolocation' in navigator)) { $('status').lastChild.textContent = 'GPS non disponible'; return; }
     distance = 0; last = null; smooth = 0; recent = [];
     startTime = Date.now();
-    $('speed').textContent = '0,0'; $('dist').textContent = '0,00'; $('avg').textContent = '0,0'; $('time').textContent = '00:00';
+    $('speed').textContent = '0,0'; $('pace').textContent = fmtPace(0); $('dist').textContent = '0,00'; $('avg').textContent = '0,0'; $('time').textContent = '00:00';
     $('status').lastChild.textContent = 'Recherche du signal GPS…';
     watchId = navigator.geolocation.watchPosition(onPosition, onError,
       { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
@@ -150,7 +161,7 @@
     navigator.geolocation.clearWatch(watchId); watchId = null;
     clearInterval(timerId); tick();
     if (wakeLock) { wakeLock.release().catch(()=>{}); wakeLock = null; }
-    $('speed').textContent = '0,0';
+    $('speed').textContent = '0,0'; $('pace').textContent = fmtPace(0);
     $('status').lastChild.textContent = 'Course terminée';
     $('gpsDot').className = 'gps';
     $('btn').textContent = 'Démarrer'; $('btn').classList.remove('running');
